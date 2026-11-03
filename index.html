@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Чёрная дыра Шварцшильда</title>
+<style>
+  :root { --bg: #000; --panel: rgba(12, 14, 20, 0.78); --fg: #dfe6ef; --dim: #8a96a8; --acc: #7fd4ff; --line: rgba(255,255,255,0.08); }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; overflow: hidden; }
+  #c, #overlay { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; }
+  #c { touch-action: none; cursor: grab; }
+  #c:active { cursor: grabbing; }
+  #overlay { pointer-events: none; }
+  #toggle { position: fixed; top: 12px; right: 12px; z-index: 3; width: 36px; height: 36px; border-radius: 8px; border: 1px solid var(--line);
+            background: var(--panel); color: var(--fg); font-size: 18px; cursor: pointer; backdrop-filter: blur(8px); }
+  #panel { position: fixed; top: 12px; right: 56px; z-index: 2; width: 300px; max-height: calc(100vh - 24px); overflow-y: auto;
+           background: var(--panel); border: 1px solid var(--line); border-radius: 10px; backdrop-filter: blur(10px); padding: 6px 12px 10px; }
+  #panel.hidden { display: none; }
+  h1 { font-size: 14px; margin: 6px 0 2px; font-weight: 600; letter-spacing: .02em; }
+  .sub { color: var(--dim); font-size: 11.5px; margin-bottom: 4px; }
+  details.sec { border-top: 1px solid var(--line); padding: 4px 0; }
+  summary { cursor: pointer; color: var(--acc); font-weight: 600; padding: 3px 0; user-select: none; }
+  .row { display: grid; grid-template-columns: 1fr auto; gap: 0 8px; margin: 5px 0; align-items: center; }
+  .row input[type=range] { grid-column: 1 / -1; width: 100%; accent-color: var(--acc); }
+  .row .val { color: var(--dim); font-variant-numeric: tabular-nums; }
+  .row.sel select { background: #1a1f2a; color: var(--fg); border: 1px solid var(--line); border-radius: 5px; padding: 2px 4px; }
+  .chk { display: flex; gap: 7px; align-items: center; margin: 4px 0; cursor: pointer; }
+  .chk input { accent-color: var(--acc); }
+  .presets { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; margin: 6px 0; }
+  .presets button { background: #1a1f2a; color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 5px; cursor: pointer; font: inherit; font-size: 12px; }
+  .presets button:hover { border-color: var(--acc); }
+  .about { color: var(--dim); font-size: 12px; }
+  .about p { margin: 5px 0; }
+  .about b { color: var(--fg); font-weight: 600; }
+  #info { position: fixed; left: 12px; bottom: 12px; z-index: 2; color: var(--dim); font-size: 12px; font-variant-numeric: tabular-nums;
+          background: rgba(0,0,0,0.45); padding: 6px 9px; border-radius: 7px; pointer-events: none; }
+  #hint { position: fixed; left: 12px; top: 12px; z-index: 2; color: var(--dim); font-size: 12px; background: rgba(0,0,0,0.45); padding: 6px 9px; border-radius: 7px; pointer-events: none; }
+  #err { display: none; position: fixed; inset: 20px; z-index: 10; background: #200; color: #fbb; padding: 16px; border-radius: 8px;
+         white-space: pre-wrap; font: 12px/1.4 ui-monospace, monospace; overflow: auto; }
+  @media (max-width: 600px) {
+    #panel { right: 12px; top: 56px; width: calc(100vw - 24px); max-height: 55vh; }
+    #hint { display: none; }
+  }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<canvas id="overlay"></canvas>
+<button id="toggle" title="Панель (H)">☰</button>
+<div id="panel">
+  <h1>Чёрная дыра Шварцшильда</h1>
+  <div class="sub">Трассировка лучей по геодезическим ОТО · единицы G = c = M = 1</div>
+  <div id="panel-body"></div>
+  <details class="sec about">
+    <summary>О модели</summary>
+    <p><b>Геодезические.</b> Для каждого пикселя фотон трассируется назад во времени; траектория удовлетворяет точному уравнению Бине u″ + u = 3Mu² (u = 1/r), интегрирование RK4.</p>
+    <p><b>Характерные радиусы.</b> Горизонт r = 2M, фотонная сфера r = 3M, ISCO r = 6M (внутренний край диска). Край тени — критический прицельный параметр b = √27 M ≈ 5.196M.</p>
+    <p><b>Фотонное кольцо</b> — изображения диска 1-го, 2-го… порядка от лучей, обогнувших дыру; видно в режиме «Порядок изображений».</p>
+    <p><b>Диск.</b> Тонкий, оптически толстый, излучает как чёрное тело: T ∝ r<sup>−3/4</sup>(1 − √(6M/r))<sup>1/4</sup>, газ на кеплеровских орбитах Ω = √(M/r³).</p>
+    <p><b>Смещение частоты</b> g = √(1 − 3M/r) / (1 − Ω·L<sub>z</sub>/E) объединяет Доплер, поперечный эффект и гравитационное смещение. Поскольку I<sub>ν</sub>/ν³ инвариантен, видимый спектр — планковский с температурой g·T: приближающаяся сторона ярче и голубее.</p>
+    <p><b>Звёзды</b> линзируются с сохранением поверхностной яркости; кольцо Эйнштейна и вторичные изображения возникают сами.</p>
+    <p><b>Упрощения:</b> невращающаяся дыра; нет излучения из зоны падения внутри ISCO; время прохождения света по диску не учитывается.</p>
+    <p>Мышь/палец — вращать, колесо/щипок — приблизить. <b>H</b> — скрыть панель, <b>Пробел</b> — пауза, <b>R</b> — сброс.</p>
+  </details>
+</div>
+<div id="hint">Перетаскивание — ракурс · колесо — расстояние · H — панель</div>
+<div id="info"></div>
+<pre id="err"></pre>
+<script type="module" src="js/main.js"></script>
+</body>
+</html>
