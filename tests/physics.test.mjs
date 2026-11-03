@@ -3,6 +3,8 @@
 import {
   initialRay, traceRay, redshiftFactor, diskTempPeak, diskTempShape,
   makeBlackbodyLUT, blackbodyXYZ, xyzToLinearSRGB, B_CRIT, LUT_SIZE,
+  kerrHorizon, kerrISCO, kerrPhotonOrbits, ntRoots, ntFlux, ntPeak, kerrOrbit,
+  kerrInitialRay, traceKerr, kerrR, kerrTheta, kerrRedshift, kerrCriticalCurve,
 } from '../js/physics.js';
 
 let failed = 0;
@@ -109,6 +111,133 @@ check('g при виде сверху', Math.abs(redshiftFactor(6, 0) - Math.sqr
     if (res.fate !== 'steps') worst = Math.max(worst, res.steps);
   }
   check('Шагов на луч (low, D=100) < 300', worst < 300, `максимум ${worst}`);
+}
+
+
+// ======================= Керр =======================
+console.log('\n--- Метрика Керра ---');
+const norm = v => { const l = Math.hypot(...v); return v.map(c => c / l); };
+// Камера как в js/camera.js: incl от оси y, azim; right = fwd × y.
+function kerrCam(D, inclDeg, azDeg = 0) {
+  const th = inclDeg * Math.PI / 180, ph = azDeg * Math.PI / 180;
+  const pos = [D * Math.sin(th) * Math.cos(ph), D * Math.cos(th), D * Math.sin(th) * Math.sin(ph)];
+  const fwd = pos.map(c => -c / D);
+  const right = norm([-fwd[2], 0, fwd[0]]);
+  const up = [right[1] * fwd[2] - right[2] * fwd[1], right[2] * fwd[0] - right[0] * fwd[2], right[0] * fwd[1] - right[1] * fwd[0]];
+  return { pos, dir: (x, y) => norm(fwd.map((f, i) => f + x * right[i] + y * up[i])) };
+}
+
+// 9. Характерные радиусы
+check('ISCO: a=0 → 6M, a=1 → 1M, a=−1 → 9M',
+  Math.abs(kerrISCO(0) - 6) < 1e-9 && Math.abs(kerrISCO(1) - 1) < 1e-6 && Math.abs(kerrISCO(-1) - 9) < 1e-9,
+  `ISCO(0.998) = ${kerrISCO(0.998).toFixed(4)} (лит. 1.237)`);
+check('Горизонт r+ = 1 + √(1−a²)', Math.abs(kerrHorizon(0) - 2) < 1e-12 && Math.abs(kerrHorizon(0.6) - 1.8) < 1e-12);
+{
+  const p = kerrPhotonOrbits(0), p1 = kerrPhotonOrbits(1);
+  check('Фотонные орбиты: a=0 → 3M; a=1 → 1M и 4M', Math.abs(p.pro - 3) < 1e-9 && Math.abs(p1.pro - 1) < 1e-9 && Math.abs(p1.retro - 4) < 1e-9);
+}
+
+// 10. Поток Пейджа–Торна: корни, нуль на ISCO, совпадение с прямым интегралом
+//     f ∝ −Ω'/(E−ΩL)² · ∫(E−ΩL)L' dr / r  (Page & Thorne 1974, независимая формула).
+for (const a of [0, 0.5, 0.9, 0.998, -0.7]) {
+  const roots = ntRoots(a);
+  const rootOk = roots.every(x => Math.abs(x ** 3 - 3 * x + 2 * a) < 1e-9);
+  const rin = kerrISCO(a);
+  const dr = 1e-5;
+  const d = (f, r) => (f(r + dr) - f(r - dr)) / (2 * dr);
+  const Om = r => kerrOrbit(r, a).omega, Ef = r => kerrOrbit(r, a).E, Lf = r => kerrOrbit(r, a).L;
+  let integ = 0, rr = rin, ratios = [];
+  const hstep = 1e-3;
+  for (const rt of [rin * 1.3, rin * 2, rin * 4, 40]) {
+    while (rr < rt) {   // интеграл методом средней точки
+      const rm = rr + hstep / 2;
+      integ += (Ef(rm) - Om(rm) * Lf(rm)) * d(Lf, rm) * hstep;
+      rr += hstep;
+    }
+    const fNum = -d(Om, rr) / (Ef(rr) - Om(rr) * Lf(rr)) ** 2 * integ / rr;
+    ratios.push(ntFlux(rr, a) / fNum);
+  }
+  const spread = (Math.max(...ratios) - Math.min(...ratios)) / Math.max(...ratios);
+  check(`Поток Новикова–Торна, a = ${a}`, rootOk && ntFlux(rin, a) === 0 && spread < 2e-3,
+    `пик на r = ${ntPeak(a).r.toFixed(2)} M, расхождение с интегралом ${(spread * 100).toFixed(3)}%`);
+}
+
+// 11. Согласованность начальных условий: ṙ² = R(r), μ̇² = Θ(μ)
+{
+  const a = 0.9, cam = kerrCam(30, 75, 20);
+  let worst = 0;
+  for (const [x, y] of [[0.1, 0.05], [-0.2, 0.1], [0.05, -0.3], [0.3, 0.3]]) {
+    const ini = kerrInitialRay(a, cam.pos, cam.dir(x, y));
+    const [r, mu, , rd, mud] = ini.y;
+    worst = Math.max(worst, Math.abs(rd * rd - kerrR(r, a, ini.l, ini.q)) / (r ** 4), Math.abs(mud * mud - kerrTheta(mu, a, ini.l, ini.q)) / (1 + ini.q));
+  }
+  check('Начальные условия: ṙ² = R, μ̇² = Θ', worst < 1e-6, `макс. отн. невязка ${worst.toExponential(2)}`);
+}
+
+// 12. Предел a → 0: трассировщик Керра совпадает с трассировщиком Шварцшильда
+{
+  const cam = kerrCam(30, 80, 30);
+  let worstDir = 0, worstHit = 0;
+  for (const [x, y] of [[0.3, 0.1], [-0.25, 0.2], [0.12, -0.1], [-0.4, -0.3], [0.2, 0.02]]) {
+    const dir = cam.dir(x, y);
+    const k = traceKerr(0, kerrInitialRay(0, cam.pos, dir), { stepK: 0.02, rEsc: 200 });
+    const s0 = initialRay(cam.pos, dir);
+    const s = traceRay(cam.pos, s0.v, { stepK: 0.02, rEsc: 200 });
+    if (k.fate !== s.fate) { worstDir = 1; continue; }
+    if (k.fate === 'escaped') worstDir = Math.max(worstDir, Math.acos(Math.min(1, dot3(k.dir, s.dir))));
+    if (k.hits.length && s.hits.length) worstHit = Math.max(worstHit, Math.abs(k.hits[0].r - s.hits[0].r));
+  }
+  check('Керр при a = 0 ≡ Шварцшильд', worstDir < 5e-3 && worstHit < 0.02,
+    `расхождение направлений ${worstDir.toExponential(2)} рад, точек на диске ${worstHit.toFixed(4)} M`);
+}
+function dot3(u, v) { return u[0] * v[0] + u[1] * v[1] + u[2] * v[2]; }
+
+// 12b. Лучи, проходящие над полюсом (L ≈ 0): Керр(a=0) против декартова Шварцшильда,
+//      где полюс не выделен. Проверяет аналитический учёт полярной шапки.
+{
+  const cam = kerrCam(25, 70, 0);
+  let worst = 0, n = 0;
+  for (const x of [0, 1e-6, -1e-4, 2e-3, -8e-3, 0.02]) for (const y of [0.18, 0.25, 0.3]) {
+    const dir = cam.dir(x, y);
+    const k = traceKerr(0, kerrInitialRay(0, cam.pos, dir), { stepK: 0.03, rEsc: 300, rout: 0 });
+    const s0 = initialRay(cam.pos, dir);
+    const s = traceRay(cam.pos, s0.v, { stepK: 0.03, rEsc: 300, rout: 0 });
+    if (k.fate !== s.fate) { worst = 9; continue; }
+    if (k.fate === 'escaped') { worst = Math.max(worst, Math.acos(Math.min(1, dot3(k.dir, s.dir)))); n++; }
+  }
+  check('Лучи над полюсом: Керр(a=0) ≡ Шварцшильд', worst < 5e-3 && n > 10, `макс. расхождение ${worst.toExponential(2)} рад на ${n} лучах`);
+}
+
+// 13. Края тени в экваторе для a = 0.9 против аналитики Бардина:
+//     α = −λ_c, λ_c для прямой и обратной фотонных орбит. Проверяет и знак (сплюснутая сторона — слева).
+{
+  const a = 0.9, D = 2000, cam = kerrCam(D, 90, 0);
+  const curve = kerrCriticalCurve(a, Math.PI / 2);
+  const aMin = Math.min(...curve.map(p => p[0])), aMax = Math.max(...curve.map(p => p[0]));
+  const edge = (sgn) => {
+    let lo = 0.5, hi = 12;   // |α| в M; захват при |α| < края
+    for (let i = 0; i < 40; i++) {
+      const m = (lo + hi) / 2;
+      const res = traceKerr(a, kerrInitialRay(a, cam.pos, cam.dir(sgn * m / D, 0)), { stepK: 0.03, rout: 0 });
+      if (res.fate === 'captured') lo = m; else hi = m;
+    }
+    return sgn * (lo + hi) / 2;
+  };
+  const L = edge(-1), R = edge(1);
+  check('Тень Керра (a=0.9, вид с ребра): левый край', Math.abs(L - aMin) < 0.01, `трассировка ${L.toFixed(4)} M, аналитика ${aMin.toFixed(4)} M`);
+  check('Тень Керра (a=0.9, вид с ребра): правый край', Math.abs(R - aMax) < 0.01, `трассировка ${R.toFixed(4)} M, аналитика ${aMax.toFixed(4)} M`);
+}
+
+// 14. Доплер в Керре при a = 0 совпадает со Шварцшильдом; приближающаяся сторона — синяя
+{
+  const D = 1000, cam = [0, 0.3, D];
+  const dir = norm([-10 - cam[0], -cam[1], -cam[2]]);
+  const ini = kerrInitialRay(0, cam, dir);
+  const hit = traceKerr(0, ini, { rout: 40 }).hits[0];
+  const gK = kerrRedshift(hit.r, 0, ini.E, ini.l);
+  const s0 = initialRay(cam, dir);
+  const gS = redshiftFactor(hit.r, s0.bY, D);
+  check('Смещение g: Керр(a=0) = Шварцшильд', Math.abs(gK - gS) < 1e-3 && gK > 1, `g = ${gK.toFixed(4)} vs ${gS.toFixed(4)}`);
 }
 
 console.log(failed ? `\n${failed} проверок не прошли` : '\nВсе проверки пройдены');

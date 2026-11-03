@@ -41,7 +41,7 @@ export function buildUI(root, state, onChange) {
     const row = el('label', 'row sel');
     const s = el('select');
     for (const [v, t] of options) { const o = el('option', null, t); o.value = v; s.appendChild(o); }
-    s.addEventListener('change', () => { state[key] = isNaN(+s.value) ? s.value : +s.value; onChange(key); });
+    s.addEventListener('change', () => { state[key] = typeof state[key] === 'number' ? +s.value : s.value; onChange(key); });
     row.append(el('span', 'name', label), s);
     parent.appendChild(row);
     const refresh = () => { s.value = state[key]; };
@@ -65,6 +65,9 @@ export function buildUI(root, state, onChange) {
 
   // --- Физика ---
   const phys = section('Физика');
+  select(phys, 'Метрика', 'metric', [['schw', 'Шварцшильд (a = 0)'], ['kerr', 'Керр (вращающаяся)']]);
+  slider(phys, 'Спин a', 'spin', -0.998, 0.998, 0.001, v => v.toFixed(3),
+    'a = J/M. a > 0 — диск вращается вместе с дырой, a < 0 — навстречу. Предел Торна 0.998');
   slider(phys, 'T<sub>max</sub> диска', 'tmax', 3000, 30000, 100, v => `${v.toFixed(0)} K`, 'Максимальная температура диска в системе газа (на r = 8.17 M)');
   slider(phys, 'Внешний радиус', 'rout', 10, 40, 0.5, v => `${v.toFixed(1)} M`);
   check(phys, 'Доплеровское смещение', 'doppler', 'Движение газа: релятивистский Доплер + поперечный эффект');

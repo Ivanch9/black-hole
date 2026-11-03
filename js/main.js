@@ -1,5 +1,8 @@
 import { cameraBasis, attachControls } from './camera.js';
-import { makeBlackbodyLUT, diskTempPeak, LUT_TMIN, LUT_TMAX, LUT_SIZE, R_ISCO, B_CRIT } from './physics.js';
+import {
+  makeBlackbodyLUT, diskTempPeak, LUT_TMIN, LUT_TMAX, LUT_SIZE, R_ISCO, B_CRIT,
+  kerrHorizon, kerrISCO, ntRoots, ntPeak, kerrCriticalCurve, KERR_SPIN_MAX,
+} from './physics.js';
 import { buildUI } from './ui.js';
 
 // Пресеты качества: максимальный масштаб трассировки, лимит шагов, шаг интегратора (доля r).
@@ -11,8 +14,10 @@ const QUALITY = {
   ultra: { maxScale: 1.0, steps: 700, stepK: 0.035, dpr: 2 },
 };
 const BLOOM_LEVELS = 6;
+const KERR_TMAX = 10000;
 
 const DEFAULTS = {
+  metric: 'schw', spin: 0.9,
   incl: 85, azim: 0, dist: 30, fov: 50, autoRotate: false,
   tmax: 6000, rout: 20, doppler: true, grav: true, beaming: true, turb: true, disk: true, stars: true, milky: true,
   timeSpeed: 30, paused: false, mode: 0, exposure: -2, bloom: 0.08, starBright: 1, quality: 'high', adaptive: true, overlay: false,
@@ -95,6 +100,7 @@ function setUniforms(prog, values) {
     else if (v.int != null) gl.uniform1i(loc, v.int);
     else if (v.length === 2) gl.uniform2fv(loc, v);
     else if (v.length === 3) gl.uniform3fv(loc, v);
+    else if (v.length === 4) gl.uniform4fv(loc, v);
     else if (v.length === 9) gl.uniformMatrix3fv(loc, false, v);
   }
 }
@@ -114,7 +120,8 @@ function galaxyMatrix() {
 async function main() {
   const [vs, fsBH, fsBloom, fsPost] = await Promise.all(
     ['shaders/quad.vert', 'shaders/blackhole.frag', 'shaders/bloom.frag', 'shaders/post.frag'].map(loadText));
-  const progBH = program(vs, fsBH, 'blackhole.frag');
+  const progSchw = program(vs, fsBH, 'blackhole.frag');
+  const progKerr = program(vs, fsBH.replace('#version 300 es', '#version 300 es\n#define KERR'), 'blackhole.frag (Kerr)');
   const progBloom = program(vs, fsBloom, 'bloom.frag');
   const progPost = program(vs, fsPost, 'post.frag');
   const vao = gl.createVertexArray();
@@ -130,6 +137,16 @@ async function main() {
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
 
   const peak = diskTempPeak(R_ISCO);
+  // Параметры Керра пересчитываются только при смене спина.
+  let kerr = null;
+  function kerrParams(a) {
+    if (kerr && kerr.a === a) return kerr;
+    const rin = kerrISCO(a);
+    const [x1, x2, x3] = ntRoots(a);
+    const pk = ntPeak(a, rin);
+    kerr = { a, rin, rH: kerrHorizon(a), nt: [Math.sqrt(rin), x1, x2, x3], Fmax: pk.F, rPeak: pk.r, curve: null, curveKey: '' };
+    return kerr;
+  }
   const gal = galaxyMatrix();
 
   let hdr = null, bloom = [], canvasW = 0, canvasH = 0, scale = QUALITY[state.quality].maxScale, rtW = 0, rtH = 0;
@@ -159,6 +176,12 @@ async function main() {
   let dirtyHash = false;
   const ui = buildUI(document.getElementById('panel-body'), state, key => {
     if (key === 'quality') scale = QUALITY[state.quality].maxScale;
+    // У быстро вращающейся дыры излучение сосредоточено у горизонта и сильно покраснено —
+    // при переключении метрики подбираем видимую температуру, если пользователь её не менял.
+    if (key === 'metric') {
+      if (state.metric === 'kerr' && state.tmax === DEFAULTS.tmax) { state.tmax = KERR_TMAX; ui.refresh(); }
+      else if (state.metric === 'schw' && state.tmax === KERR_TMAX) { state.tmax = DEFAULTS.tmax; ui.refresh(); }
+    }
     dirtyHash = true;
   });
   attachControls(canvas, state, () => { ui.refresh(); dirtyHash = true; });
@@ -202,6 +225,11 @@ async function main() {
     const cam = cameraBasis(state);
     const tanHalf = Math.tan(state.fov * Math.PI / 360);
 
+    const isKerr = state.metric === 'kerr';
+    const a = Math.max(-KERR_SPIN_MAX, Math.min(KERR_SPIN_MAX, state.spin));
+    const kp = isKerr ? kerrParams(a) : null;
+    const progBH = isKerr ? progKerr : progSchw;
+
     // 1. Трассировка лучей → HDR
     gl.bindFramebuffer(gl.FRAMEBUFFER, hdr.fb);
     gl.viewport(0, 0, rtW, rtH);
@@ -210,9 +238,11 @@ async function main() {
     gl.bindTexture(gl.TEXTURE_2D, lutTex);
     setUniforms(progBH, {
       uRes: [rtW, rtH], uCamPos: cam.pos, uCamRight: cam.right, uCamUp: cam.up, uCamFwd: cam.fwd,
-      uTanHalf: tanHalf, uTime: simTime, uRin: R_ISCO, uRout: state.rout,
-      uTscale: state.tmax / peak.f, uObsG: 1 / Math.sqrt(1 - 2 / state.dist),
-      uMaxSteps: { int: q.steps }, uStepK: q.stepK, uREsc: Math.max(state.dist * 1.02, state.rout * 2.5, 50),
+      uTanHalf: tanHalf, uTime: simTime, uRin: isKerr ? kp.rin : R_ISCO, uRout: state.rout,
+      uTscale: isKerr ? state.tmax / Math.pow(kp.Fmax, 0.25) : state.tmax / peak.f,
+      uObsG: 1 / Math.sqrt(1 - 2 / state.dist),
+      uA: a, uRH: isKerr ? kp.rH : 2, uNT: isKerr ? kp.nt : [0, 0, 0, 0],
+      uMaxSteps: { int: isKerr ? Math.round(q.steps * 1.5) : q.steps }, uStepK: q.stepK, uREsc: Math.max(state.dist * 1.02, state.rout * 2.5, 50),
       uDoppler: state.doppler, uGrav: state.grav, uBeaming: state.beaming, uDisk: state.disk,
       uStars: state.stars, uMilky: state.milky, uTurb: state.turb, uMode: { int: state.mode },
       uBB: { int: 0 }, uLogTmin: Math.log(LUT_TMIN), uLogTmax: Math.log(LUT_TMAX),
@@ -264,32 +294,51 @@ async function main() {
     // Угловой радиус тени для статического наблюдателя: sin α = √27·√(1−2/D)/D
     const sinA = Math.min(1, B_CRIT * Math.sqrt(1 - 2 / state.dist) / state.dist);
     const alpha = Math.asin(sinA);
-    drawOverlay(alpha, tanHalf);
+    drawOverlay(alpha, tanHalf, kp);
 
     if (now - lastInfo > 250) {
       lastInfo = now;
       info.innerHTML =
         `${fpsEma.toFixed(0)} к/с · трассировка ${rtW}×${rtH} (${Math.round(scale * 100)}%)<br>` +
-        `t = ${simTime.toFixed(0)} M · угловой радиус тени ${(alpha * 180 / Math.PI).toFixed(2)}°`;
+        (isKerr
+          ? `Керр a = ${a.toFixed(3)} · r₊ = ${kp.rH.toFixed(3)} M · ISCO = ${kp.rin.toFixed(3)} M · пик потока r = ${kp.rPeak.toFixed(2)} M<br>t = ${simTime.toFixed(0)} M`
+          : `Шварцшильд · r₊ = 2 M · ISCO = 6 M<br>t = ${simTime.toFixed(0)} M · угловой радиус тени ${(alpha * 180 / Math.PI).toFixed(2)}°`);
     }
     requestAnimationFrame(frame);
   }
 
-  function drawOverlay(alpha, tanHalf) {
+  function drawOverlay(alpha, tanHalf, kp) {
     const W = overlay.width, H = overlay.height;
     octx.clearRect(0, 0, W, H);
     if (!state.overlay) return;
-    const R = Math.tan(alpha) / tanHalf * H / 2;
+    let R = Math.tan(alpha) / tanHalf * H / 2;
     const k = (window.devicePixelRatio || 1);
     octx.save();
     octx.strokeStyle = 'rgba(120,220,255,0.8)';
     octx.lineWidth = 1.2 * k;
     octx.setLineDash([6 * k, 6 * k]);
-    octx.beginPath(); octx.arc(W / 2, H / 2, R, 0, Math.PI * 2); octx.stroke();
+    octx.beginPath();
+    if (!kp) octx.arc(W / 2, H / 2, R, 0, Math.PI * 2);
+    else {
+      // Кривая Бардина для далёкого наблюдателя; масштаб √(1−2/D)/D — как для статического наблюдателя.
+      const inc = Math.min(Math.max(state.incl, 1), 179) * Math.PI / 180;
+      const key = `${kp.a}|${inc}`;
+      if (kp.curveKey !== key) { kp.curve = kerrCriticalCurve(kp.a, inc); kp.curveKey = key; }
+      const f = Math.sqrt(1 - 2 / state.dist) / state.dist;
+      const px = v => Math.tan(v * f) / tanHalf * H / 2;
+      let maxR = 0;
+      kp.curve.forEach(([x, y], i) => {
+        const X = W / 2 + px(x), Y = H / 2 - px(y);
+        maxR = Math.max(maxR, Math.hypot(px(x), px(y)));
+        if (i === 0) octx.moveTo(X, Y); else octx.lineTo(X, Y);
+      });
+      R = maxR;
+    }
+    octx.stroke();
     octx.setLineDash([]);
     octx.fillStyle = 'rgba(160,230,255,0.95)';
     octx.font = `${12 * k}px system-ui, sans-serif`;
-    const label = 'критическая кривая  b = √27 M ≈ 5.196 M';
+    const label = kp ? `критическая кривая Бардина, a = ${kp.a.toFixed(3)}` : 'критическая кривая  b = √27 M ≈ 5.196 M';
     const tw = octx.measureText(label).width;
     const lx = Math.min(W / 2 + R * 0.72 + 6 * k, W - tw - 8 * k);
     const ly = Math.max(H / 2 - R * 0.72 - 6 * k, 20 * k);
